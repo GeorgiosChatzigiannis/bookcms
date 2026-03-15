@@ -5,6 +5,7 @@
 	position: relative;
 	background: var(--bg-page, #ffffff);
 	z-index: 100;
+	overflow: hidden;
 }
 
 .bb-page {
@@ -114,5 +115,6 @@
 	top: 0;
 	left: 0;
 	display: none;
+	overflow: hidden;
 	background: var(--bg-page, #ffffff);
 }

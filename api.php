@@ -208,7 +208,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         exit;
     }
     
-    // --- Upload image ---
+    // --- Upload image (auto-convert WebP, generate 3 responsive sizes) ---
     if ($action === 'upload_image') {
         $uploadDir = __DIR__ . '/uploads/';
         if (!is_dir($uploadDir)) mkdir($uploadDir, 0755, true);
@@ -227,21 +227,90 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
         
-        if ($file['size'] > 5 * 1024 * 1024) {
-            echo json_encode(['ok' => false, 'error' => 'Μέγιστο 5MB']);
+        if ($file['size'] > 10 * 1024 * 1024) {
+            echo json_encode(['ok' => false, 'error' => 'Μέγιστο 10MB']);
             exit;
         }
+
+        $baseName = time() . '-' . preg_replace('/[^a-z0-9\-]/', '', strtolower(pathinfo($file['name'], PATHINFO_FILENAME)));
         
-        $filename = time() . '-' . preg_replace('/[^a-z0-9\.\-]/', '', strtolower($file['name']));
-        $dest = $uploadDir . $filename;
-        
-        if (move_uploaded_file($file['tmp_name'], $dest)) {
-            // Return relative URL from book root
-            $url = 'uploads/' . $filename;
-            echo json_encode(['ok' => true, 'url' => $url, 'filename' => $filename]);
-        } else {
-            echo json_encode(['ok' => false, 'error' => 'Upload failed']);
+        // SVG: just move
+        if ($ext === 'svg') {
+            $fn = $baseName . '.svg';
+            move_uploaded_file($file['tmp_name'], $uploadDir . $fn);
+            echo json_encode(['ok' => true, 'url' => 'uploads/' . $fn, 'filename' => $fn]);
+            exit;
         }
+
+        // Generate responsive sizes: 400w, 800w, 1200w
+        $sizes = [400, 800, 1200];
+        $quality = 82;
+        $urls = [];
+        $mainUrl = '';
+
+        if (function_exists('imagewebp') && function_exists('imagecreatefromstring')) {
+            $imgData = file_get_contents($file['tmp_name']);
+            $src = @imagecreatefromstring($imgData);
+            
+            if ($src) {
+                $origW = imagesx($src);
+                $origH = imagesy($src);
+                
+                foreach ($sizes as $targetW) {
+                    if ($targetW >= $origW && !empty($urls)) continue; // Skip if original is smaller
+                    
+                    $w = min($targetW, $origW);
+                    $h = (int)($origH * ($w / $origW));
+                    
+                    $resized = imagecreatetruecolor($w, $h);
+                    imagealphablending($resized, false);
+                    imagesavealpha($resized, true);
+                    imagecopyresampled($resized, $src, 0, 0, 0, 0, $w, $h, $origW, $origH);
+                    
+                    $fn = $baseName . '-' . $w . 'w.webp';
+                    if (imagewebp($resized, $uploadDir . $fn, $quality)) {
+                        $urls[] = ['url' => 'uploads/' . $fn, 'width' => $w];
+                        if (!$mainUrl || $w === 800) $mainUrl = 'uploads/' . $fn;
+                    }
+                    imagedestroy($resized);
+                    
+                    if ($w >= $origW) break; // Original is smaller than target
+                }
+                imagedestroy($src);
+                
+                if (!empty($urls)) {
+                    // Build srcset string
+                    $srcset = implode(', ', array_map(function($u) {
+                        return $u['url'] . ' ' . $u['width'] . 'w';
+                    }, $urls));
+                    
+                    // Main URL = 800w or largest available
+                    if (!$mainUrl) $mainUrl = end($urls)['url'];
+                    
+                    echo json_encode([
+                        'ok' => true,
+                        'url' => $mainUrl,
+                        'srcset' => $srcset,
+                        'sizes' => '(max-width: 480px) 400px, (max-width: 900px) 800px, 1200px',
+                        'variants' => $urls,
+                        'original_size' => $file['size'],
+                        'format' => 'webp'
+                    ]);
+                    exit;
+                }
+            }
+        }
+        
+        // Fallback: save original
+        $fn = $baseName . '.' . $ext;
+        move_uploaded_file($file['tmp_name'], $uploadDir . $fn);
+        echo json_encode([
+            'ok' => true,
+            'url' => 'uploads/' . $fn,
+            'filename' => $fn,
+            'format' => $ext,
+            'note' => 'WebP unavailable'
+        ]);
         exit;
     }
 }

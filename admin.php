@@ -531,8 +531,27 @@ async function uploadFile(file) {
 
         if (data.ok) {
             const preview = document.getElementById('uploadPreview');
-            preview.innerHTML = `<img src="${data.url}" alt=""><span class="img-url" onclick="copyUrl('${data.url}')" title="Κλικ για αντιγραφή">${data.url}</span>`;
-            toast('✓ Ανέβηκε: ' + data.filename);
+            let html = `<img src="${data.url}" alt="" style="height:60px;border-radius:6px">`;
+            
+            // Show responsive variants info
+            if (data.variants && data.variants.length > 1) {
+                html += `<div style="flex:1;font-size:11px;color:var(--text2)">`;
+                html += `<div style="margin-bottom:4px;color:var(--success);font-weight:600">✓ ${data.variants.length} μεγέθη WebP</div>`;
+                data.variants.forEach(v => {
+                    html += `<div>${v.width}px — <span style="color:var(--accent);cursor:pointer" onclick="copyUrl('${v.url}')">${v.url}</span></div>`;
+                });
+                html += `</div>`;
+            } else {
+                html += `<span class="img-url" onclick="copyUrl('${data.url}')">${data.url}</span>`;
+            }
+            
+            // Button to insert into editor
+            const srcset = data.srcset || '';
+            const sizes = data.sizes || '';
+            html += `<button class="btn btn-primary btn-sm" style="margin-top:6px" onclick="insertImageToEditor('${data.url}','${srcset}','${sizes}')">📥 Εισαγωγή στο κείμενο</button>`;
+            
+            preview.innerHTML = html;
+            toast('✓ Ανέβηκε' + (data.format === 'webp' ? ' (WebP)' : ''));
         } else {
             toast('✗ ' + (data.error || 'Σφάλμα'), false);
         }
@@ -544,6 +563,24 @@ async function uploadFile(file) {
 
 function copyUrl(url) {
     navigator.clipboard.writeText(url).then(() => toast('✓ URL αντιγράφηκε'));
+}
+
+function insertImageToEditor(url, srcset, sizes) {
+    if (htmlMode) {
+        // Insert raw HTML img tag
+        const ta = document.getElementById('edRawHtml');
+        let imgTag = `<img src="${url}" loading="lazy" style="max-width:100%;height:auto"`;
+        if (srcset) imgTag += ` srcset="${srcset}" sizes="${sizes}"`;
+        imgTag += ` alt="">`;
+        ta.value += '\n' + imgTag + '\n';
+        toast('✓ Εικόνα προστέθηκε στο HTML');
+    } else if (quill) {
+        // Insert into Quill at cursor
+        const range = quill.getSelection(true);
+        quill.insertEmbed(range.index, 'image', url);
+        quill.setSelection(range.index + 1);
+        toast('✓ Εικόνα προστέθηκε');
+    }
 }
 
 // ─── Init ───

@@ -75,6 +75,24 @@ const App = (() => {
             s.textContent = this.textContent;
             this.parentNode.replaceChild(s, this);
         });
+        // Sanitize images: strip width/height attributes, add lazy loading
+        $el.find('img').each(function() {
+            this.removeAttribute('width');
+            this.removeAttribute('height');
+            this.style.removeProperty('width');
+            this.style.removeProperty('height');
+            if (!this.getAttribute('loading')) this.setAttribute('loading', 'lazy');
+        });
+    };
+
+    // ─── Preload images from HTML string ───
+    const preloadImages = (html) => {
+        if (!html) return;
+        const m = html.match(/src=["']([^"']+\.(jpg|jpeg|png|gif|webp))[^"']*/gi);
+        if (m) m.forEach(match => {
+            const url = match.replace(/src=["']/i, '').replace(/["'].*/, '');
+            if (url) new Image().src = url;
+        });
     };
 
     // ─── INIT ───
@@ -82,15 +100,22 @@ const App = (() => {
         buildFlatPages();
         if (!totalPages) return;
 
+        // Resolve from PHP config first, then double-check against URL
         current = CFG.startPage || 0;
 
-        // Current page is ALREADY in the DOM from PHP.
-        // Just init BookBlock with startPage.
+        // Safety: also check URL directly (in case PHP value was cached)
+        const urlResolved = resolveFromURL();
+        if (urlResolved !== null && urlResolved !== current) {
+            current = urlResolved;
+        }
+
+        // Current page is ALREADY in the DOM from PHP (if not cached).
+        // Init BookBlock with patched startPage.
         bbPlugin = $bookBlock.bookblock({
-            speed: 800,
-            perspective: 2000,
-            shadowSides: 0.8,
-            shadowFlip: 0.4,
+            speed: 900,
+            perspective: 2500,
+            shadowSides: 0.15,
+            shadowFlip: 0.1,
             startPage: current + 1,
             onEndFlip: (oldIdx, newIdx, isLimit) => {
                 current = newIdx;
@@ -98,11 +123,35 @@ const App = (() => {
             }
         });
 
+        // Post-init safety: verify BookBlock actually landed on the right page
+        // Access internal state
+        try {
+            var bbData = $.data($bookBlock[0], 'bookblock');
+            if (bbData && bbData.current !== current) {
+                bbPlugin.jump(current + 1);
+            }
+        } catch(e) {}
+
         initUI();
         updateAll();
 
+        // If current page is empty (cached HTML was for different page), load it
+        var $cur = $('#page-' + current);
+        if ($cur.is(':empty') || $cur.children().length === 0) {
+            fetchContent(current).then(function(html) { fillPage(current, html); });
+        }
+
         // Pre-load adjacent pages in background
         loadAdjacent(current);
+    };
+
+    // ─── Resolve page from URL path ───
+    const resolveFromURL = () => {
+        var path = window.location.pathname;
+        var bp = CFG.basePath || '';
+        var route = path.replace(bp, '').replace(/^\/+|\/+$/g, '');
+        if (route && slugToIndex[route] !== undefined) return slugToIndex[route];
+        return null;
     };
 
     // ─── After flip ───
@@ -125,7 +174,10 @@ const App = (() => {
             if (i >= 0 && i < totalPages) {
                 const $el = $('#page-' + i);
                 if ($el.is(':empty') || $el.children().length === 0) {
-                    fetchContent(i).then(html => fillPage(i, html));
+                    fetchContent(i).then(html => {
+                        fillPage(i, html);
+                        preloadImages(html); // Pre-download images
+                    });
                 }
             }
         });
@@ -134,9 +186,10 @@ const App = (() => {
     // ─── Clean far pages ───
     const cleanFarPages = () => {
         for (let i = 0; i < totalPages; i++) {
-            if (Math.abs(i - current) > 4) {
+            if (Math.abs(i - current) > 3) {
                 const $el = $('#page-' + i);
                 if ($el.children().length > 0) $el.empty();
+                delete contentCache[i];
             }
         }
     };
@@ -221,8 +274,8 @@ const App = (() => {
     };
 
     // TOC open/close
-    const openTOC = () => { $navNext.hide(); $navPrev.hide(); $container.addClass('slideRight').data('opened', true); };
-    const closeTOC = (cb) => { updateAll(); $container.removeClass('slideRight').data('opened', false); if (cb) setTimeout(cb, 300); };
+    const openTOC = () => { $container.addClass('slideRight').data('opened', true); };
+    const closeTOC = (cb) => { $container.removeClass('slideRight').data('opened', false); if (cb) setTimeout(cb, 300); };
     const toggleTOC = () => { $container.data('opened') ? closeTOC() : openTOC(); };
 
     // ─── UI Init ───
@@ -230,6 +283,9 @@ const App = (() => {
         $navNext.on('click', () => { bbPlugin.next(); return false; });
         $navPrev.on('click', () => { bbPlugin.prev(); return false; });
         $tblcontents.on('click', toggleTOC);
+        
+        // Backdrop click closes sidebar
+        $('#sidebarBackdrop').on('click', () => closeTOC());
 
         // Swipe
         $bookBlock.on('swipeleft', '.bb-item', () => { if (!$container.data('opened')) bbPlugin.next(); return false; });
@@ -242,9 +298,14 @@ const App = (() => {
             if (e.key === 'ArrowLeft') bbPlugin.prev();
         });
 
-        // History
+        // History — guard against Safari's initial popstate fire
+        let isInitialLoad = true;
+        setTimeout(() => { isInitialLoad = false; }, 500);
+
         window.addEventListener('popstate', (e) => {
+            if (isInitialLoad) return;
             if (e.state && typeof e.state.index === 'number') {
+                current = e.state.index;
                 bbPlugin.jump(e.state.index + 1);
             }
         });

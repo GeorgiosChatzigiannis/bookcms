@@ -92,14 +92,58 @@ foreach ($toc as $ch) {
 $typeLabels = ['article'=>'📄 Άρθρο', 'video'=>'🎬 Βίντεο', 'app'=>'🛠️ Εφαρμογή'];
 
 // ─── Render a page div ───
+// ─── Sanitize images: strip width/height, add lazy loading, auto srcset ───
+function sanitizeImages(string $html): string {
+    // Remove width/height attributes
+    $html = preg_replace('/<img([^>]*)\s+width\s*=\s*["\'][^"\']*["\']([^>]*)>/i', '<img$1$2>', $html);
+    $html = preg_replace('/<img([^>]*)\s+height\s*=\s*["\'][^"\']*["\']([^>]*)>/i', '<img$1$2>', $html);
+    // Remove inline width/height styles
+    $html = preg_replace_callback('/<img([^>]*)style\s*=\s*"([^"]*)"([^>]*)>/i', function($m) {
+        $style = preg_replace('/\b(width|height)\s*:\s*[^;]+;?/i', '', $m[2]);
+        $style = trim($style, '; ');
+        return '<img' . $m[1] . ($style ? 'style="'.$style.'"' : '') . $m[3] . '>';
+    }, $html);
+    // Add loading="lazy"
+    $html = preg_replace('/<img(?![^>]*loading=)([^>]*)>/i', '<img loading="lazy"$1>', $html);
+    
+    // Auto-detect responsive variants for uploaded images
+    $html = preg_replace_callback('/<img([^>]*)src\s*=\s*"(uploads\/[^"]+)"([^>]*)>/i', function($m) {
+        $before = $m[1]; $src = $m[2]; $after = $m[3];
+        // Skip if already has srcset
+        if (stripos($before . $after, 'srcset') !== false) return $m[0];
+        
+        // Check for responsive variants (name-400w.webp, name-800w.webp, name-1200w.webp)
+        $base = preg_replace('/-\d+w\.webp$/i', '', $src);
+        $base = preg_replace('/\.webp$/i', '', $base);
+        
+        $variants = [];
+        foreach ([400, 800, 1200] as $w) {
+            $variant = $base . '-' . $w . 'w.webp';
+            if (file_exists(__DIR__ . '/' . $variant)) {
+                $variants[] = $variant . ' ' . $w . 'w';
+            }
+        }
+        
+        if (count($variants) > 1) {
+            $srcset = implode(', ', $variants);
+            return '<img' . $before . 'src="' . $src . '" srcset="' . $srcset . '" sizes="(max-width:480px) 400px,(max-width:900px) 800px,1200px"' . $after . '>';
+        }
+        
+        return $m[0];
+    }, $html);
+    
+    return $html;
+}
+
 function renderPageDiv(int $i, array $flatPages, ?string $content = null): string {
     global $typeLabels;
     if (!isset($flatPages[$i])) return "<div class=\"bb-item\" id=\"page-{$i}\"></div>";
     $p = $flatPages[$i];
     if ($content === null) {
-        // Empty placeholder — will be filled by JS on flip
         return "<div class=\"bb-item\" id=\"page-{$i}\"></div>";
     }
+    // Sanitize images in content
+    $content = sanitizeImages($content);
     $type = $p['type'];
     $tl = $typeLabels[$type] ?? $type;
     $html = "<div class=\"bb-item\" id=\"page-{$i}\">";
@@ -107,22 +151,24 @@ function renderPageDiv(int $i, array $flatPages, ?string $content = null): strin
     $html .= "<div class=\"chapter-label\">" . htmlspecialchars($p['ch_icon'] . ' ' . $p['ch_title']) . "</div>";
     $html .= "<h2>" . htmlspecialchars($p['title']) . "</h2>";
     $html .= "<span class=\"type-indicator {$type}\">{$tl}</span>";
-    $html .= $content; // Already HTML from DB
+    $html .= $content;
     $html .= "</div></div></div>";
     return $html;
 }
 
 // Cache headers
 header('X-Content-Type-Options: nosniff');
-if ($currentSection) {
-    header('Cache-Control: public, max-age=300'); // 5min cache
-}
+// Prevent aggressive caching (mobile browsers serve stale page on refresh)
+header('Cache-Control: no-cache, must-revalidate');
+header('Vary: Accept-Encoding');
 ?>
 <!DOCTYPE html>
 <html lang="el" class="no-js">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta http-equiv="Cache-Control" content="no-cache, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
     <title><?= htmlspecialchars($metaTitle) ?></title>
     <meta name="description" content="<?= htmlspecialchars($metaDesc) ?>">
     <meta property="og:title" content="<?= htmlspecialchars($metaTitle) ?>">
@@ -138,6 +184,10 @@ if ($currentSection) {
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <base href="<?= htmlspecialchars($basePath) ?>/">
+    <link rel="manifest" href="manifest.json">
+    <meta name="theme-color" content="#2563eb">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
     <link rel="stylesheet" href="css/bookblock.css">
     <link rel="stylesheet" href="css/custom.css">
 
@@ -151,6 +201,7 @@ if ($currentSection) {
         .page-indicator{display:none}.bar-btn .s-label{display:none}
         .share-bar{top:10px;right:10px}.bar-btn{padding:8px 10px}
         .js .content{top:50px;bottom:80px}
+        .js .content::before,.js .content::after{display:none!important}
         .scroller{padding:8px 5% 20px}
     }
     </style>
@@ -172,6 +223,7 @@ if ($currentSection) {
 </head>
 <body>
 <div id="container" class="container">
+    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
     <div class="menu-panel">
         <div class="menu-header">
             <div class="menu-brand">
@@ -222,10 +274,29 @@ if ($currentSection) {
 </div>
 <div class="toast-msg"></div>
 
+<!-- Embed Popup (for HTML apps/pages) -->
+<div class="embed-overlay" id="embedOverlay">
+    <div class="embed-modal">
+        <div class="embed-header">
+            <span class="embed-title" id="embedTitle">Εφαρμογή</span>
+            <button class="embed-close" id="embedClose" title="Κλείσιμο">✕</button>
+        </div>
+        <div class="embed-body">
+            <iframe id="embedFrame" src="about:blank" sandbox="allow-scripts allow-same-origin allow-forms allow-popups" loading="lazy"></iframe>
+        </div>
+    </div>
+</div>
+
 <script src="https://ajax.googleapis.com/ajax/libs/jquery/1.8.3/jquery.min.js"></script>
 <script src="js/jquery.mousewheel.js"></script>
 <script src="js/jquerypp.custom.js"></script>
 <script src="js/jquery.bookblock.js"></script>
 <script src="js/app.js"></script>
+<script>
+// Register Service Worker for PWA / offline support
+if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('sw.js').catch(function(){});
+}
+</script>
 </body>
 </html>
